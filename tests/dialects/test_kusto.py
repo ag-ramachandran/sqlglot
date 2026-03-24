@@ -1,3 +1,8 @@
+import sqlglot
+from sqlglot import exp
+from sqlglot.dialects.dialect import Dialect
+from sqlglot.optimizer.scope import traverse_scope
+
 from tests.dialects.test_dialect import Validator
 
 
@@ -655,3 +660,254 @@ class TestKusto(Validator):
                 "": "SELECT COUNT(*) AS Total FROM Logs",
             },
         )
+
+    def test_parse_multi_statement(self):
+        """Superset uses sqlglot.parse() to split scripts into statements."""
+        results = sqlglot.parse(
+            "StormEvents | take 10; Logs | where level == 'error' | take 5",
+            dialect="kusto",
+        )
+        self.assertEqual(len(results), 2)
+        self.assertIsInstance(results[0], exp.Select)
+        self.assertIsInstance(results[1], exp.Select)
+        self.assertEqual(results[0].sql(), "SELECT * FROM StormEvents LIMIT 10")
+        self.assertEqual(
+            results[1].sql(),
+            "SELECT * FROM Logs WHERE level = 'error' LIMIT 5",
+        )
+
+    def test_table_extraction(self):
+        """Superset uses traverse_scope to extract table references."""
+        ast = sqlglot.parse_one("StormEvents | where x > 1 | take 10", dialect="kusto")
+        tables = set()
+        for scope in traverse_scope(ast):
+            for source in scope.sources.values():
+                if isinstance(source, exp.Table):
+                    tables.add(source.name)
+        self.assertEqual(tables, {"StormEvents"})
+
+    def test_join_table_extraction(self):
+        """Table extraction should include joined tables."""
+        ast = sqlglot.parse_one(
+            "StormEvents | join kind=inner PopulationData on State",
+            dialect="kusto",
+        )
+        tables = set()
+        for scope in traverse_scope(ast):
+            for source in scope.sources.values():
+                if isinstance(source, exp.Table):
+                    tables.add(source.name)
+        self.assertEqual(tables, {"StormEvents", "PopulationData"})
+
+    def test_function_extraction(self):
+        """Superset uses find_all(exp.Func) to check functions present."""
+        ast = sqlglot.parse_one(
+            "StormEvents | summarize cnt = count(), avg_damage = avg(DamageProperty) by State",
+            dialect="kusto",
+        )
+        funcs = {f.sql_name() for f in ast.find_all(exp.Func)}
+        self.assertIn("COUNT", funcs)
+        self.assertIn("AVG", funcs)
+
+    def test_is_select(self):
+        """Superset checks isinstance(parsed, exp.Select) for is_select."""
+        ast = sqlglot.parse_one("StormEvents | take 10", dialect="kusto")
+        self.assertIsInstance(ast, exp.Select)
+
+    def test_not_mutating(self):
+        """KQL queries should never be considered mutating."""
+        ast = sqlglot.parse_one("StormEvents | take 10", dialect="kusto")
+        mutating = (
+            exp.Insert,
+            exp.Update,
+            exp.Delete,
+            exp.Merge,
+            exp.Create,
+            exp.Drop,
+            exp.TruncateTable,
+            exp.Alter,
+        )
+        self.assertFalse(any(ast.find(nt) for nt in mutating))
+
+    def test_limit_get_and_set(self):
+        """Superset reads and modifies LIMIT via AST args."""
+        ast = sqlglot.parse_one("StormEvents | take 10", dialect="kusto")
+
+        # Read limit
+        limit_node = ast.args.get("limit")
+        self.assertIsNotNone(limit_node)
+        literal = limit_node.args.get("expression") or getattr(limit_node, "this", None)
+        self.assertIsInstance(literal, exp.Literal)
+        self.assertTrue(literal.is_int)
+        self.assertEqual(int(literal.name), 10)
+
+        # Set limit
+        ast.args["limit"] = exp.Limit(expression=exp.Literal(this="100", is_string=False))
+        self.assertIn("LIMIT 100", ast.sql())
+
+    def test_format_pretty(self):
+        """Superset calls Dialect.generate() for pretty-printing."""
+        ast = sqlglot.parse_one(
+            "StormEvents | where State == 'TEXAS' | summarize cnt = count() by EventType | sort by cnt desc | take 10",
+            dialect="kusto",
+        )
+        formatted = Dialect.get_or_raise("kusto").generate(ast, pretty=True, comments=True)
+        self.assertIn("StormEvents", formatted)
+        self.assertIn("| where", formatted)
+        self.assertIn("| summarize", formatted)
+        self.assertIn("| sort by", formatted)
+        self.assertIn("| take 10", formatted)
+        # Pretty print uses newlines before pipes
+        self.assertIn("\n| ", formatted)
+
+    def test_transpile_to_dialects(self):
+        """KQL parsed to AST can be output in any SQL dialect."""
+        ast = sqlglot.parse_one("StormEvents | where State == 'TEXAS' | take 10", dialect="kusto")
+        for target in ("duckdb", "mysql", "postgres", "bigquery", "snowflake"):
+            sql = ast.sql(dialect=target)
+            self.assertIn("StormEvents", sql)
+            self.assertIn("TEXAS", sql)
+
+    def test_parse_predicate(self):
+        """Superset uses parse_one for RLS predicates."""
+        pred = sqlglot.parse_one("id = 42", dialect="kusto")
+        self.assertIsInstance(pred, exp.EQ)
+        self.assertEqual(pred.sql(), "id = 42")
+
+        pred2 = sqlglot.parse_one("State = 'TEXAS' AND Population > 1000", dialect="kusto")
+        self.assertIsInstance(pred2, exp.And)
+
+    def test_ast_transform(self):
+        """Superset uses .transform() for RLS injection."""
+        ast = sqlglot.parse_one("StormEvents | project State", dialect="kusto")
+
+        def transformer(node):
+            if isinstance(node, exp.Table) and node.name == "StormEvents":
+                return node
+            return node
+
+        transformed = ast.transform(transformer)
+        self.assertIn("StormEvents", transformed.sql())
+
+    def test_generate_kql_basic(self):
+        """Generator produces KQL pipe syntax."""
+        self.validate_all(
+            "StormEvents | take 10",
+            write={"kusto": "StormEvents | take 10"},
+        )
+        self.validate_all(
+            "StormEvents | where State == 'TEXAS' | take 10",
+            write={"kusto": "StormEvents | where State == 'TEXAS' | take 10"},
+        )
+        self.validate_all(
+            "StormEvents | project State, EventType",
+            write={"kusto": "StormEvents | project State, EventType"},
+        )
+
+    def test_generate_kql_operators(self):
+        """Generator handles all KQL pipe operators."""
+        self.validate_all(
+            "StormEvents | where x > 1 | project Name, Age",
+            write={"kusto": "StormEvents | where x > 1 | project Name, Age"},
+        )
+        self.validate_all(
+            "StormEvents | summarize cnt = count() by State",
+            write={"kusto": "StormEvents | summarize cnt = count() by State"},
+        )
+        self.validate_all(
+            "StormEvents | sort by x desc",
+            write={"kusto": "StormEvents | sort by x desc"},
+        )
+        self.validate_all(
+            "StormEvents | distinct State, EventType",
+            write={"kusto": "StormEvents | distinct State, EventType"},
+        )
+        self.validate_all(
+            "StormEvents | join kind=inner PopData on State",
+            write={"kusto": "StormEvents | join kind=inner PopData on State"},
+        )
+
+    def test_generate_kql_functions(self):
+        """Generator reverse-maps SQL functions to KQL equivalents."""
+        for kql in (
+            "T | project strlen(x)",
+            "T | project tolower(x)",
+            "T | project toupper(x)",
+            "T | project abs(x)",
+            "T | project round(x, 2)",
+            "T | project iff(a, b, c)",
+            "T | project now()",
+            "T | project tostring(x)",
+            "T | project toint(x)",
+            "T | project coalesce(a, b, c)",
+            "T | project trim(x)",
+            "T | project trim_start(x)",
+            "T | project trim_end(x)",
+            "T | project hash(x)",
+            "T | project hash_sha256(x)",
+            "T | project log(x)",
+            "T | project log10(x)",
+            "T | project log2(x)",
+            "T | project pow(x, 2)",
+            "T | project exp10(x)",
+            "T | project split(s, ',')",
+            "T | project isnull(x)",
+            "T | project isnotnull(x)",
+        ):
+            self.validate_all(kql, write={"kusto": kql})
+
+    def test_generate_kql_ago_and_bin(self):
+        """Generator reverse-maps ago() and bin()."""
+        self.validate_all(
+            "T | where ts > ago(1d)",
+            write={"kusto": "T | where ts > ago(1d)"},
+        )
+        self.validate_all(
+            "T | project bin(ts, 1h)",
+            write={"kusto": "T | project bin(ts, 1h)"},
+        )
+        self.validate_all(
+            "T | project startofday(ts)",
+            write={"kusto": "T | project startofday(ts)"},
+        )
+        self.validate_all(
+            "T | project startofmonth(ts)",
+            write={"kusto": "T | project startofmonth(ts)"},
+        )
+
+    def test_generate_kql_chained(self):
+        """Generator handles complex chained operators."""
+        self.validate_all(
+            "StormEvents | where State == 'TEXAS' | summarize cnt = count() by EventType | sort by cnt desc | take 10",
+            write={
+                "kusto": "StormEvents | where State == 'TEXAS' | summarize cnt = count() by EventType | sort by cnt desc | take 10",
+            },
+        )
+
+    def test_superset_roundtrip_add_limit(self):
+        """Superset adds LIMIT to KQL, output stays KQL."""
+        ast = sqlglot.parse_one(
+            "StormEvents | where State == 'TEXAS' | project Name",
+            dialect="kusto",
+        )
+        ast.args["limit"] = exp.Limit(expression=exp.Literal(this="100", is_string=False))
+        self.assertEqual(
+            ast.sql(dialect="kusto"),
+            "StormEvents | where State == 'TEXAS' | project Name | take 100",
+        )
+
+    def test_superset_roundtrip_add_rls(self):
+        """Superset injects RLS WHERE predicate, output stays KQL."""
+        ast = sqlglot.parse_one("StormEvents | take 10", dialect="kusto")
+        rls_pred = exp.EQ(this=exp.column("tenant_id"), expression=exp.Literal.number(42))
+        ast.args["where"] = exp.Where(this=rls_pred)
+        self.assertEqual(
+            ast.sql(dialect="kusto"),
+            "StormEvents | where tenant_id == 42 | take 10",
+        )
+
+    def test_superset_roundtrip_modify_limit(self):
+        """Superset modifies existing LIMIT, output stays KQL."""
+        ast = sqlglot.parse_one("StormEvents | take 10", dialect="kusto")
+        ast.args["limit"] = exp.Limit(expression=exp.Literal(this="100", is_string=False))
+        self.assertEqual(ast.sql(dialect="kusto"), "StormEvents | take 100")

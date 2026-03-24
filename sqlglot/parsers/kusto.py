@@ -254,8 +254,15 @@ class KustoParser(parser.Parser):
         return self._parse_query() or self._parse_expression()
 
     def _parse_query(self) -> t.Optional[exp.Query]:
+        index = self._index
         table = self._parse_table_parts()
         if not table:
+            return None
+
+        # Only treat as KQL query if followed by pipe or end of statement.
+        # Otherwise retreat and let _parse_expression handle it (e.g. "id = 42").
+        if self._curr and self._curr.token_type != TokenType.PIPE:
+            self._retreat(index)
             return None
 
         query: exp.Query = exp.select("*").from_(table, copy=False)
