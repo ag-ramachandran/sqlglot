@@ -78,6 +78,7 @@ DIALECTS = [
     "Exasol",
     "Fabric",
     "Hive",
+    "Kusto",
     "Materialize",
     "MySQL",
     "Oracle",
