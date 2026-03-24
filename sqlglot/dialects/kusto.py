@@ -116,24 +116,34 @@ class Kusto(Dialect):
             from_ = expression.args.get("from_")
             table = self.sql(from_.this) if from_ else ""
 
-            parts = [table]
             sep = "\n| " if self.pretty else " | "
-
-            # JOIN
-            for join in expression.args.get("joins") or []:
-                parts.append(self._kql_join(join))
-
-            # WHERE
-            where = expression.args.get("where")
-            if where:
-                parts.append(f"where {self.sql(where, 'this')}")
 
             # SELECT expressions / GROUP BY / DISTINCT
             group = expression.args.get("group")
             distinct = expression.args.get("distinct")
             exprs = expression.expressions
+            where = expression.args.get("where")
+            order = expression.args.get("order")
+            limit = expression.args.get("limit")
+            joins = expression.args.get("joins")
 
             is_star = len(exprs) == 1 and isinstance(exprs[0], exp.Star)
+            has_kql_ops = where or group or order or limit or joins or distinct or not is_star
+
+            # Fall back to base SQL generation for plain SELECT * FROM t
+            if not has_kql_ops:
+                return super().select_sql(expression)
+
+            parts = [table]
+
+            # JOIN
+            for join in joins or []:
+                parts.append(self._kql_join(join))
+
+            # WHERE
+            if where:
+                parts.append(f"where {self.sql(where, 'this')}")
+
             has_agg = any(
                 isinstance(e.this if isinstance(e, exp.Alias) else e, exp.AggFunc) for e in exprs
             )
@@ -152,13 +162,11 @@ class Kusto(Dialect):
                 parts.append(f"project {cols}")
 
             # ORDER BY
-            order = expression.args.get("order")
             if order:
                 order_exprs = ", ".join(self.sql(e) for e in order.expressions)
                 parts.append(f"sort by {order_exprs}")
 
             # LIMIT
-            limit = expression.args.get("limit")
             if limit:
                 limit_val = self.sql(limit.expression)
                 parts.append(f"take {limit_val}")
