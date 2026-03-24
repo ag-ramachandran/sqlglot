@@ -114,9 +114,7 @@ class KustoParser(parser.Parser):
         "TOINT": lambda args: exp.Cast(this=seq_get(args, 0), to=exp.DataType.build("INT")),
         "TOLONG": lambda args: exp.Cast(this=seq_get(args, 0), to=exp.DataType.build("BIGINT")),
         "TOREAL": lambda args: exp.Cast(this=seq_get(args, 0), to=exp.DataType.build("DOUBLE")),
-        "TODECIMAL": lambda args: exp.Cast(
-            this=seq_get(args, 0), to=exp.DataType.build("DECIMAL")
-        ),
+        "TODECIMAL": lambda args: exp.Cast(this=seq_get(args, 0), to=exp.DataType.build("DECIMAL")),
         "TOBOOL": lambda args: exp.Cast(this=seq_get(args, 0), to=exp.DataType.build("BOOLEAN")),
         "TODATETIME": lambda args: exp.Cast(
             this=seq_get(args, 0), to=exp.DataType.build("TIMESTAMPTZ")
@@ -138,7 +136,9 @@ class KustoParser(parser.Parser):
         "FORMAT_DATETIME": lambda args: exp.TimeToStr(
             this=seq_get(args, 0), format=seq_get(args, 1)
         ),
-        "STARTOFDAY": lambda args: exp.DateTrunc(unit=exp.Literal.string("DAY"), this=seq_get(args, 0)),
+        "STARTOFDAY": lambda args: exp.DateTrunc(
+            unit=exp.Literal.string("DAY"), this=seq_get(args, 0)
+        ),
         "STARTOFMONTH": lambda args: exp.DateTrunc(
             unit=exp.Literal.string("MONTH"), this=seq_get(args, 0)
         ),
@@ -181,9 +181,7 @@ class KustoParser(parser.Parser):
         "POW": lambda args: exp.Pow(this=seq_get(args, 0), expression=seq_get(args, 1)),
         "SQRT": lambda args: exp.Sqrt(this=seq_get(args, 0)),
         "EXP": lambda args: exp.Exp(this=seq_get(args, 0)),
-        "EXP10": lambda args: exp.Pow(
-            this=exp.Literal.number(10), expression=seq_get(args, 0)
-        ),
+        "EXP10": lambda args: exp.Pow(this=exp.Literal.number(10), expression=seq_get(args, 0)),
         "SIGN": lambda args: exp.func("SIGN", seq_get(args, 0)),
         # Array
         "ARRAY_LENGTH": lambda args: exp.ArraySize(this=seq_get(args, 0)),
